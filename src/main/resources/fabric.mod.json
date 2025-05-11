@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "id": "journeymap-share",
+  "version": "${version}",
+  "name": "JourneyMap Share",
+  "description": "Allow to share journeymap discovered land with your friends!",
+  "authors": [
+    "Gaetan RAYNAUD"
+  ],
+  "contact": {
+    "homepage": "https://fabricmc.net/",
+    "sources": "https://github.com/FabricMC/fabric-example-mod"
+  },
+  "license": "CC0-1.0",
+  "icon": "assets/journeymap-share/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "fr.gaetanraynaud.journeymapshare.JourneyMapShare"
+    ],
+    "client": [
+      "fr.gaetanraynaud.journeymapshare.JourneyMapShareClient"
+    ],
+    "journeymap": [
+      "fr.gaetanraynaud.journeymapshare.JourneyMapApiClient"
+    ]
+  },
+  "mixins": [
+    "journeymap-share.mixins.json",
+    {
+      "config": "journeymap-share.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=0.16.14",
+    "minecraft": "~1.21.5",
+    "java": ">=21",
+    "fabric-api": "*",
+    "journeymap": "*"
+  },
+  "suggests": {
+    "another-mod": "*"
+  }
+}
