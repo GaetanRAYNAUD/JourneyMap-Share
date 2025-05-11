@@ -5,5 +5,7 @@ import net.minecraft.util.Identifier;
 
 public class NetworkingConstants {
 
-    public static final Identifier C2S_IMAGE_ID = Identifier.of(JourneyMapShare.MOD_ID, "c2s_image");
+    public static final Identifier IMAGE_ID = Identifier.of(JourneyMapShare.MOD_ID, "image");
+
+    public static final Identifier SUBSCRIBE_ID = Identifier.of(JourneyMapShare.MOD_ID, "subscribe");
 }
