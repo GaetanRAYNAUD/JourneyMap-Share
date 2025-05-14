@@ -15,7 +15,6 @@ import java.io.IOException;
 import java.nio.file.FileSystemException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
-import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.StandardWatchEventKinds;
@@ -25,7 +24,6 @@ import java.nio.file.WatchService;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentHashMap.KeySetView;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -57,13 +55,15 @@ public class JourneyMapApiClient implements IClientPlugin {
 
     private void mappingStageEvent(MappingEvent event) {
         if (event.getStage() == MappingEvent.Stage.MAPPING_STARTED) {
-            JourneyMapShare.LOGGER.info("Starting {} on the client", JourneyMapShare.MOD_ID);
-            this.location = this.jmClientApi.getDataPath(JourneyMapShare.MOD_ID).getParentFile().getParentFile().toPath();
+            if (this.location == null) {
+                JourneyMapShare.LOGGER.info("Starting {} on the client", JourneyMapShare.MOD_ID);
+                this.location = this.jmClientApi.getDataPath(JourneyMapShare.MOD_ID).getParentFile().getParentFile().toPath();
 
-            try {
-                init();
-            } catch (IOException e) {
-                JourneyMapShare.LOGGER.error("An error occurred while initialising", e);
+                try {
+                    init();
+                } catch (IOException e) {
+                    JourneyMapShare.LOGGER.error("An error occurred while initialising", e);
+                }
             }
         } else {
             if (this.watchService != null) {
@@ -89,6 +89,7 @@ public class JourneyMapApiClient implements IClientPlugin {
 
         this.watchService = FileSystems.getDefault().newWatchService();
         for (String world : JourneyMapShare.WORLDS_TO_WATCH) {
+            this.location.resolve(world).toAbsolutePath().toFile().mkdirs();
             this.location.resolve(world)
                          .toAbsolutePath()
                          .register(this.watchService, new WatchEvent.Kind[]{StandardWatchEventKinds.ENTRY_MODIFY, StandardWatchEventKinds.ENTRY_CREATE},
@@ -98,19 +99,21 @@ public class JourneyMapApiClient implements IClientPlugin {
 
         this.executor = Executors.newSingleThreadExecutor();
         this.executor.submit(() -> {
+            Set<Path> paths = new HashSet<>();
+
             while (true) {
                 WatchKey key = this.watchService.take();
                 Path folder = (Path) key.watchable();
-                Set<Path> paths = new HashSet<>();
 
                 for (WatchEvent<?> event : key.pollEvents()) {
                     if (event.context() instanceof Path path) {
-                        path = folder.resolve(path).normalize().toAbsolutePath();
                         if (JourneyMapShare.FILENAME_MATCH.test(path.getFileName().toString())) {
+                            path = folder.resolve(path).normalize().toAbsolutePath();
                             paths.add(path);
                         }
                     }
                 }
+
                 key.reset();
 
                 if (paths.isEmpty()) {
@@ -120,7 +123,7 @@ public class JourneyMapApiClient implements IClientPlugin {
                 String worldName = folder.getFileName().toString();
 
                 for (Path path : paths) {
-                    //To prevent infinite loop where because we received an image from the server, we write to disk so it triggers a change event.
+                    //To prevent an infinite loop, because when we receive an image from the server, we write to disk so it triggers a change event.
                     if (this.processedPaths.contains(path)) {
                         continue;
                     }
@@ -128,12 +131,11 @@ public class JourneyMapApiClient implements IClientPlugin {
                     try {
                         JourneyMapShare.LOGGER.debug("Watch event received for image: {}", path);
                         String filename = path.getFileName().toString();
-                        filename = filename.substring(0, filename.length() - 4);
-                        String[] pos = filename.split(",");
+                        filename = filename.substring(0, filename.length() - 4); //Remove .png
+                        String[] pos = filename.split(","); //Split {x},{y}
 
-                        ClientPlayNetworking.send(
-                                new ImagePayload(worldName, path.getParent().getFileName().toString(), Integer.parseInt(pos[0]), Integer.parseInt(pos[1]),
-                                                 Files.readAllBytes(path), path.toFile().lastModified()));
+                        ClientPlayNetworking.send(new ImagePayload(worldName, path.getParent().getFileName().toString(), Integer.parseInt(pos[0]),
+                                                                   Integer.parseInt(pos[1]), Files.readAllBytes(path), path.toFile().lastModified()));
                     } catch (FileSystemException e) {
                         //ignored because it is most likely an infinite loop
                     } catch (Exception e) {
@@ -145,6 +147,8 @@ public class JourneyMapApiClient implements IClientPlugin {
                 paths.clear();
             }
         });
+
+        //Tell the server that we have this mod installed
         ClientPlayNetworking.send(new SubscribePayload(false));
     }
 
@@ -156,14 +160,14 @@ public class JourneyMapApiClient implements IClientPlugin {
         }
 
         try {
-            Path path = payload.getPath(this.location).normalize().toAbsolutePath();
+            Path path = payload.getPath(this.location);
             FileUtils.forceMkdirParent(path.toFile());
 
             synchronized (path.toString()) {
                 //Write the file if it does not exist or the server version is more recent
-                if (!Files.exists(path) || payload.timestamp() > path.toFile().lastModified()) {
+                if (!Files.exists(path) || payload.getTimestamp() > path.toFile().lastModified()) {
                     this.processedPaths.add(path);
-                    Files.write(path, payload.image(), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+                    Files.write(path, payload.getImage(), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
                 }
             }
         } catch (Exception e) {

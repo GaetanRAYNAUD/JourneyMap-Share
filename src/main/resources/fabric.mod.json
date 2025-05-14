@@ -5,7 +5,7 @@
   "name": "JourneyMap Share",
   "description": "Allow to share journeymap discovered land with your friends!",
   "authors": [
-    "Gaetan RAYNAUD"
+    "Gaétan RAYNAUD"
   ],
   "contact": {
     "homepage": "https://fabricmc.net/",
@@ -25,13 +25,6 @@
       "fr.gaetanraynaud.journeymapshare.JourneyMapApiClient"
     ]
   },
-  "mixins": [
-    "journeymap-share.mixins.json",
-    {
-      "config": "journeymap-share.client.mixins.json",
-      "environment": "client"
-    }
-  ],
   "depends": {
     "fabricloader": ">=0.16.14",
     "minecraft": "~1.21.5",
