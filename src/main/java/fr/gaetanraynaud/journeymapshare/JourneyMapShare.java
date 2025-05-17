@@ -1,11 +1,10 @@
 package fr.gaetanraynaud.journeymapshare;
 
-import com.mojang.serialization.Codec;
-import com.mojang.serialization.MapDecoder;
-import com.mojang.serialization.codecs.FieldDecoder;
 import fr.gaetanraynaud.journeymapshare.network.ImagePayload;
+import fr.gaetanraynaud.journeymapshare.network.ImageTimestamp;
+import fr.gaetanraynaud.journeymapshare.network.ImagesListPayload;
+import fr.gaetanraynaud.journeymapshare.network.ImagesMetaListPayload;
 import fr.gaetanraynaud.journeymapshare.network.SubscribePayload;
-import it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.entity.event.v1.ServerEntityWorldChangeEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
@@ -15,14 +14,15 @@ import net.fabricmc.fabric.api.networking.v1.PlayerLookup;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking.Context;
-import net.minecraft.component.DataComponentTypes;
-import net.minecraft.component.type.NbtComponent;
-import net.minecraft.nbt.NbtCompound;
+import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.registry.RegistryKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
-import net.minecraft.util.Identifier;
+import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.WorldSavePath;
+import net.minecraft.world.World;
 import org.apache.commons.io.FileUtils;
+import org.apache.commons.lang3.tuple.Pair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,14 +37,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
-import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.SortedMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Function;
@@ -55,7 +53,8 @@ import java.util.stream.Stream;
 
 public class JourneyMapShare implements ModInitializer {
 
-    public static final String[] WORLDS_TO_WATCH = new String[] {"overworld", "the_nether", "the_end"};
+    public static final Map<String, RegistryKey<World>> WORLDS_TO_WATCH = Stream.of(ServerWorld.OVERWORLD, ServerWorld.NETHER, ServerWorld.END)
+                                                                                .collect(Collectors.toMap(k -> k.getValue().getPath(), Function.identity()));
 
     public static final Predicate<String> FILENAME_MATCH = Pattern.compile("-?\\d+,-?\\d+\\.png").asMatchPredicate();
 
@@ -63,43 +62,32 @@ public class JourneyMapShare implements ModInitializer {
 
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
-    public static final Identifier DATES_IDENTIFIER = Identifier.of(MOD_ID, "last_sync_dates");
+    private final Map<RegistryKey<World>, Map<String, Set<ImageTimestamp>>> maps = WORLDS_TO_WATCH.values()
+                                                                                                  .stream()
+                                                                                                  .collect(Collectors.toMap(Function.identity(),
+                                                                                                                            s -> new ConcurrentHashMap<>()));
 
-    public static final String DATES_IDENTIFIER_STING = DATES_IDENTIFIER.toString();
-
-    public static final Codec<Map<String, Long>> DATES_CODEC = Codec.unboundedMap(Codec.STRING, Codec.LONG);
-
-    public static final MapDecoder<Map<String, Long>> DATES_DECODER = new FieldDecoder<>(DATES_IDENTIFIER_STING, DATES_CODEC);
-
-    private final SortedMap<Long, Map<String, Set<MapId>>> maps = new ConcurrentSkipListMap<>(Comparator.reverseOrder());
-
-    private final Map<UUID, String> subscribedPlayers = new ConcurrentHashMap<>();
+    private final Map<UUID, RegistryKey<World>> subscribedPlayers = new ConcurrentHashMap<>();
 
     private final ConcurrentHashMap<UUID, ConcurrentLinkedQueue<MapId>> mapsToSend = new ConcurrentHashMap<>();
+
+    private boolean init = false;
 
     private Path location;
 
     @Override
     public void onInitialize() {
         //Prepare local disk
-        ServerLifecycleEvents.SERVER_STARTED.register(server -> {
-            LOGGER.info("Started {} on server!", MOD_ID);
-            LOGGER.debug("Started server in folder {}", server.getSavePath(WorldSavePath.ROOT).toAbsolutePath());
-            this.location = server.getSavePath(WorldSavePath.ROOT).toAbsolutePath().resolve("journeymap-share");
-            init();
-        });
+        ServerLifecycleEvents.SERVER_STARTED.register(this::init);
 
         //Unsubscribe player when disconnect
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> unsubscribe(handler.player));
 
+        //For singleplayer
+        ServerLifecycleEvents.SERVER_STOPPING.register(server -> cleanup());
+
         //Register player changing dimension to send him out of date images for this dimension
-        ServerEntityWorldChangeEvents.AFTER_PLAYER_CHANGE_WORLD.register((player, origin, destination) -> {
-            if (this.subscribedPlayers.containsKey(player.getUuid())) {
-                if (!origin.equals(destination)) {
-                    registerPlayerForWorld(player, JourneyMapShareUtils.serverWorldToWorldName(destination));
-                }
-            }
-        });
+        ServerEntityWorldChangeEvents.AFTER_PLAYER_CHANGE_WORLD.register(this::playerChangeWorld);
 
         //Register a task to send 1 packet at each tick
         ServerTickEvents.END_SERVER_TICK.register(this::sendNextPacket);
@@ -107,34 +95,43 @@ public class JourneyMapShare implements ModInitializer {
         //Packets handlers
         PayloadTypeRegistry.playC2S().register(ImagePayload.ID, ImagePayload.CODEC);
         PayloadTypeRegistry.playC2S().register(SubscribePayload.ID, SubscribePayload.CODEC);
+        PayloadTypeRegistry.playC2S().register(ImagesMetaListPayload.ID, ImagesMetaListPayload.CODEC);
+        PayloadTypeRegistry.playC2S().register(ImagesListPayload.ID, ImagesListPayload.CODEC);
         ServerPlayNetworking.registerGlobalReceiver(ImagePayload.ID,
                                                     (payload, context) -> context.server().execute(() -> processImagePayload(payload, context)));
-        ServerPlayNetworking.registerGlobalReceiver(SubscribePayload.ID, (payload, context) -> context.server().execute(() -> subscribe(context)));
+        ServerPlayNetworking.registerGlobalReceiver(SubscribePayload.ID, (payload, context) -> context.server().execute(() -> subscribe(context, payload)));
+        ServerPlayNetworking.registerGlobalReceiver(ImagesListPayload.ID,
+                                                    (payload, context) -> context.server().execute(() -> handleListRequest(context, payload)));
     }
 
-    private void init() {
-        if (this.location == null) {
+    private void init(MinecraftServer server) {
+        if (!FabricLoader.getInstance().isDevelopmentEnvironment() && !server.isDedicated()) {
+            cleanup();
             return;
         }
 
-        for (String world : WORLDS_TO_WATCH) {
-            this.location.resolve(world).toFile().mkdirs();
-        }
+        this.location = server.getSavePath(WorldSavePath.ROOT).toAbsolutePath().resolve("journeymap-share");
+        this.init = true;
+        LOGGER.info("Started {} on server in folder {}!", MOD_ID, this.location);
 
         try (ExecutorService executorService = Executors.newSingleThreadExecutor()) {
             executorService.submit(() -> {
-                for (String world : WORLDS_TO_WATCH) {
-                    try (Stream<Path> stream = Files.walk(this.location.resolve(world))) {
-                        stream.filter(Files::isRegularFile).filter(path -> FILENAME_MATCH.test(path.getFileName().toString())).forEach(path -> {
-                            long lastModified = path.toFile().lastModified();
-                            String filename = path.getFileName().toString();
-                            filename = filename.substring(0, filename.length() - 4);
-                            String[] pos = filename.split(",");
+                for (Map.Entry<String, RegistryKey<World>> world : WORLDS_TO_WATCH.entrySet()) {
+                    Path worldPath = this.location.resolve(world.getKey());
+                    worldPath.toFile().mkdirs();
 
-                            MapId mapId = new MapId(world, path.getParent().getFileName().toString(), Integer.parseInt(pos[0]), Integer.parseInt(pos[1]));
-                            this.maps.computeIfAbsent(lastModified, aLong -> new ConcurrentHashMap<>())
-                                     .computeIfAbsent(mapId.world(), s -> ConcurrentHashMap.newKeySet())
-                                     .add(new MapId(world, path.getParent().getFileName().toString(), Integer.parseInt(pos[0]), Integer.parseInt(pos[1])));
+                    for (String type : JourneyMapShareUtils.worldToTypes(server.getWorld(world.getValue()))) {
+                        worldPath.resolve(type).toFile().mkdir();
+                    }
+
+                    try (Stream<Path> stream = Files.walk(worldPath)) {
+                        stream.filter(Files::isRegularFile).filter(path -> FILENAME_MATCH.test(path.getFileName().toString())).forEach(path -> {
+                            Pair<Integer, Integer> pos = JourneyMapShareUtils.pathToXY(path);
+
+                            MapId mapId = new MapId(world.getKey(), path.getParent().getFileName().toString(), pos.getLeft(), pos.getRight());
+                            this.maps.get(world.getValue())
+                                     .computeIfAbsent(mapId.type(), s -> ConcurrentHashMap.newKeySet())
+                                     .add(new ImageTimestamp(pos.getLeft(), pos.getRight(), path.toFile().lastModified()));
                         });
                     } catch (IOException e) {
                         LOGGER.error("An error occurred while listing files", e);
@@ -144,10 +141,19 @@ public class JourneyMapShare implements ModInitializer {
         }
     }
 
+    private void cleanup() {
+        this.location = null;
+        this.mapsToSend.clear();
+        this.subscribedPlayers.clear();
+        for (Map<String, Set<ImageTimestamp>> map : this.maps.values()) {
+            map.clear();
+        }
+    }
+
     private void processImagePayload(ImagePayload payload, Context context) {
         LOGGER.debug("Received image payload {} from {}", payload, context.player());
 
-        if (this.location == null) {
+        if (!this.init || this.location == null) {
             return;
         }
 
@@ -215,14 +221,19 @@ public class JourneyMapShare implements ModInitializer {
 
                 if (changed) {
                     payload.setTimestamp(path.toFile().lastModified());
-                    this.maps.computeIfAbsent(payload.getTimestamp(), aLong -> new ConcurrentHashMap<>())
-                             .computeIfAbsent(payload.getWorld(), s -> ConcurrentHashMap.newKeySet())
-                             .add(payload.getMapId());
+                    Map<String, Set<ImageTimestamp>> map = this.maps.get(WORLDS_TO_WATCH.get(payload.getWorld()));
+
+                    if (map == null) {
+                        return;
+                    }
+
+                    map.computeIfAbsent(payload.getType(), s -> ConcurrentHashMap.newKeySet())
+                       .add(payload.getImageTimestamp());
                     UUID sender = context.player().getUuid();
                     for (ServerPlayerEntity player : PlayerLookup.all(context.server())) {
                         try {
                             if ((sendToSender || !sender.equals(player.getUuid())) && this.subscribedPlayers.containsKey(player.getUuid()) &&
-                                this.subscribedPlayers.get(player.getUuid()).equals(payload.getWorld())) {
+                                this.subscribedPlayers.get(player.getUuid()).equals(WORLDS_TO_WATCH.get(payload.getWorld()))) {
                                 this.mapsToSend.computeIfAbsent(player.getUuid(), e -> new ConcurrentLinkedQueue<>()).add(payload.getMapId());
                             }
                         } catch (Exception e) {
@@ -237,29 +248,61 @@ public class JourneyMapShare implements ModInitializer {
     }
 
     /**
-     * Init action when a player with the mod connects.
+     * Init action when a player with the mod connects. Check if config is compatible before.
      */
-    private void subscribe(Context context) {
-        registerPlayerForWorld(context.player(), JourneyMapShareUtils.serverWorldToWorldName(context.player().getServerWorld()));
+    private void subscribe(Context context, SubscribePayload payload) {
+        if (!this.init) {
+            return;
+        }
+
+        boolean valid = true;
+        valid &= "true".equals(payload.config().get("mapBathymetry"));
+        valid &= "true".equals(payload.config().get("mapWaterBiomeColors"));
+        valid &= "true".equals(payload.config().get("ignoreHeightmaps"));
+        valid &= "true".equals(payload.config().get("mapTransparency"));
+        valid &= "true".equals(payload.config().get("mapCaveLighting"));
+        valid &= "true".equals(payload.config().get("mapAntialiasing"));
+        valid &= "false".equals(payload.config().get("mapPlantShadows"));
+        valid &= "true".equals(payload.config().get("mapShadows"));
+        valid &= "false".equals(payload.config().get("mapPlants"));
+        valid &= "false".equals(payload.config().get("mapCrops"));
+        valid &= "true".equals(payload.config().get("mapBlendGrass"));
+        valid &= "true".equals(payload.config().get("mapBlendFoliage"));
+        valid &= "true".equals(payload.config().get("mapBlendWater"));
+
+        if (valid) {
+            registerPlayerForWorld(context.player(), context.player().getWorld().getRegistryKey());
+        } else {
+            this.subscribedPlayers.remove(context.player().getUuid());
+        }
     }
 
     private void unsubscribe(ServerPlayerEntity player) {
+        if (!this.init) {
+            return;
+        }
+
         this.subscribedPlayers.remove(player.getUuid());
         this.mapsToSend.remove(player.getUuid());
     }
 
-    private void registerPlayerForWorld(ServerPlayerEntity player, String world) {
+    private void playerChangeWorld(ServerPlayerEntity player, ServerWorld origin, ServerWorld destination) {
+        if (!this.init) {
+            return;
+        }
+
+        if (this.subscribedPlayers.containsKey(player.getUuid())) {
+            if (!origin.equals(destination)) {
+                registerPlayerForWorld(player, destination.getRegistryKey());
+            }
+        }
+    }
+
+    private void registerPlayerForWorld(ServerPlayerEntity player, RegistryKey<World> world) {
         this.subscribedPlayers.put(player.getUuid(), world);
 
-        Map<String, Long> dates = getMapForPlayer(player);
-
-        if (dates.containsKey(world)) {
-            ConcurrentLinkedQueue<MapId> queue = this.mapsToSend.computeIfAbsent(player.getUuid(), p -> new ConcurrentLinkedQueue<>());
-            for (Map<String, Set<MapId>> map : this.maps.headMap(dates.get(world)).values()) {
-                if (map.containsKey(world)) {
-                    queue.addAll(map.get(world));
-                }
-            }
+        for (String type : JourneyMapShareUtils.worldToTypes(player.getServerWorld())) {
+            ServerPlayNetworking.send(player, new ImagesMetaListPayload(world.getValue().getPath(), type, this.maps.get(world).get(type)));
         }
     }
 
@@ -267,6 +310,10 @@ public class JourneyMapShare implements ModInitializer {
      * Pick the first map to send in the first element in the list to send, and send it to all players waiting for it.
      */
     private void sendNextPacket(MinecraftServer server) {
+        if (!this.init) {
+            return;
+        }
+
         MapId mapId = null;
         for (Map.Entry<UUID, ConcurrentLinkedQueue<MapId>> entry : this.mapsToSend.entrySet()) {
             if (!entry.getValue().isEmpty()) {
@@ -288,7 +335,6 @@ public class JourneyMapShare implements ModInitializer {
                         if (player != null) {
                             LOGGER.debug("Sent image {} to {}", payload, player);
                             ServerPlayNetworking.send(player, payload);
-                            updateDateForPlayer(player, payload.getWorld(), payload.getTimestamp());
                         }
                     }
 
@@ -299,36 +345,17 @@ public class JourneyMapShare implements ModInitializer {
         }
     }
 
-    private NbtComponent initNbtForPlayer(ServerPlayerEntity player) {
-        NbtComponent nbt = player.get(DataComponentTypes.CUSTOM_DATA);
-
-        if (nbt == null) {
-            nbt = NbtComponent.of(new NbtCompound());
+    private void handleListRequest(Context context, ImagesListPayload payload) {
+        if (!this.init) {
+            return;
         }
 
-        if (!nbt.contains(DATES_IDENTIFIER_STING)) {
-            nbt = nbt.apply(nbtCompound -> nbtCompound.put(DATES_IDENTIFIER_STING, DATES_CODEC,
-                                                           Arrays.stream(WORLDS_TO_WATCH).collect(Collectors.toMap(Function.identity(), s -> 0L))));
-            player.setComponent(DataComponentTypes.CUSTOM_DATA, nbt);
+        ConcurrentLinkedQueue<MapId> queue = this.mapsToSend.computeIfAbsent(context.player().getUuid(), p -> new ConcurrentLinkedQueue<>());
+
+        for (Map.Entry<Integer, List<Integer>> entry : payload.getImages().entrySet()) {
+            for (Integer y : entry.getValue()) {
+                queue.add(new MapId(payload.getWorld(), payload.getType(), entry.getKey(), y));
+            }
         }
-
-        return nbt;
-    }
-
-    private Map<String, Long> getMapForPlayer(ServerPlayerEntity player) {
-        return getMapForPlayer(player, false);
-    }
-
-    private Map<String, Long> getMapForPlayer(ServerPlayerEntity player, boolean writeableCopy) {
-        Map<String, Long> map = initNbtForPlayer(player).get(DATES_DECODER).getOrThrow();
-
-        return writeableCopy ? new Object2ObjectOpenHashMap<>(map) : map;
-    }
-
-    private void updateDateForPlayer(ServerPlayerEntity player, String word, long timestamp) {
-        NbtComponent nbt = initNbtForPlayer(player);
-        Map<String, Long> dates = getMapForPlayer(player, true);
-        dates.put(word, timestamp);
-        player.setComponent(DataComponentTypes.CUSTOM_DATA, nbt.apply(nbtCompound -> nbtCompound.put(DATES_IDENTIFIER_STING, DATES_CODEC, dates)));
     }
 }

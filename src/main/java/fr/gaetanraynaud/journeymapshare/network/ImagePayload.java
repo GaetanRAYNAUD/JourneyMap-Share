@@ -9,7 +9,6 @@ import net.minecraft.network.packet.CustomPayload;
 import net.minecraft.util.Identifier;
 
 import java.nio.file.Path;
-import java.util.Objects;
 
 /**
  * Packet with the data on an image, used for C2S and S2C.
@@ -52,6 +51,10 @@ public final class ImagePayload implements CustomPayload {
 
     public MapId getMapId() {
         return new MapId(this.world, this.type, this.x, this.y);
+    }
+
+    public ImageTimestamp getImageTimestamp() {
+        return new ImageTimestamp(this.x, this.y, this.timestamp);
     }
 
     public String getWorld() {
