@@ -271,7 +271,7 @@ public class JourneyMapShare implements ModInitializer {
         valid &= "true".equals(payload.config().get("mapBlendWater"));
 
         if (valid) {
-            registerPlayerForWorld(context.player(), context.player().getWorld().getRegistryKey());
+            registerPlayerForWorld(context.player(), context.player().getEntityWorld().getRegistryKey());
         } else {
             this.subscribedPlayers.remove(context.player().getUuid());
         }
@@ -301,7 +301,7 @@ public class JourneyMapShare implements ModInitializer {
     private void registerPlayerForWorld(ServerPlayerEntity player, RegistryKey<World> world) {
         this.subscribedPlayers.put(player.getUuid(), world);
 
-        for (String type : JourneyMapShareUtils.worldToTypes(player.getServerWorld())) {
+        for (String type : JourneyMapShareUtils.worldToTypes(player.getEntityWorld())) {
             ServerPlayNetworking.send(player, new ImagesMetaListPayload(world.getValue().getPath(), type, this.maps.get(world).get(type)));
         }
     }
