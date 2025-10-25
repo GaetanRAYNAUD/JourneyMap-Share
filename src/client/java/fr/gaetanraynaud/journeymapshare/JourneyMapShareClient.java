@@ -12,6 +12,5 @@ public class JourneyMapShareClient implements ClientModInitializer {
     public void onInitializeClient() {
         PayloadTypeRegistry.playS2C().register(ImagePayload.ID, ImagePayload.CODEC);
         PayloadTypeRegistry.playS2C().register(SubscribePayload.ID, SubscribePayload.CODEC);
-        PayloadTypeRegistry.playS2C().register(ImagesMetaListPayload.ID, ImagesMetaListPayload.CODEC);
     }
 }

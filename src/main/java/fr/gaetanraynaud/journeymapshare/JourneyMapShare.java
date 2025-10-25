@@ -93,9 +93,9 @@ public class JourneyMapShare implements ModInitializer {
         ServerTickEvents.END_SERVER_TICK.register(this::sendNextPacket);
 
         //Packets handlers
+        PayloadTypeRegistry.playS2C().register(ImagesMetaListPayload.ID, ImagesMetaListPayload.CODEC);
         PayloadTypeRegistry.playC2S().register(ImagePayload.ID, ImagePayload.CODEC);
         PayloadTypeRegistry.playC2S().register(SubscribePayload.ID, SubscribePayload.CODEC);
-        PayloadTypeRegistry.playC2S().register(ImagesMetaListPayload.ID, ImagesMetaListPayload.CODEC);
         PayloadTypeRegistry.playC2S().register(ImagesListPayload.ID, ImagesListPayload.CODEC);
         ServerPlayNetworking.registerGlobalReceiver(ImagePayload.ID,
                                                     (payload, context) -> context.server().execute(() -> processImagePayload(payload, context)));
