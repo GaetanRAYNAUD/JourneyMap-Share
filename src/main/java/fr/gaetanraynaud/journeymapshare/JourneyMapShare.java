@@ -94,6 +94,7 @@ public class JourneyMapShare implements ModInitializer {
 
         //Packets handlers
         PayloadTypeRegistry.playS2C().register(ImagesMetaListPayload.ID, ImagesMetaListPayload.CODEC);
+        PayloadTypeRegistry.playS2C().register(ImagePayload.ID, ImagePayload.CODEC);
         PayloadTypeRegistry.playC2S().register(ImagePayload.ID, ImagePayload.CODEC);
         PayloadTypeRegistry.playC2S().register(SubscribePayload.ID, SubscribePayload.CODEC);
         PayloadTypeRegistry.playC2S().register(ImagesListPayload.ID, ImagesListPayload.CODEC);
